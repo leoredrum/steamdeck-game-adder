@@ -905,18 +905,9 @@ class AddGameWindow(Gtk.Window):
     def _on_exe_set(self, path):
         name = detect_game_name(path)
         self.name_entry.set_text(name)
-        # 自动匹配本地图片
+        # 优先搜索Steam封面，没有再用本地的
         if not self.portrait_drop.file_path and not self.landscape_drop.file_path:
-            images = find_images_near_exe(path)
-            if len(images) >= 2:
-                self.portrait_drop.set_file(images[0])
-                self.landscape_drop.set_file(images[1])
-            elif len(images) == 1:
-                self.portrait_drop.set_file(images[0])
-                self.landscape_drop.set_file(images[0])
-            else:
-                # 本地没图片，后台搜索Steam封面
-                self._search_steam_covers(name)
+            self._search_steam_covers_then_local(name, path)
 
     def _on_portrait_set(self, path):
         # 拖入竖版图片时，自动匹配exe和横版图片
@@ -958,15 +949,62 @@ class AddGameWindow(Gtk.Window):
         self._reset_drop_zone(self.landscape_drop, "\u6a2a\u7248 920x430\n\u62d6\u5165\u6216\u70b9\u51fb")
         self._search_steam_covers(name)
 
+    def _search_steam_covers_then_local(self, game_name, exe_path):
+        """先搜Steam封面，没有再用本地图片"""
+        self.status_label.set_markup(
+            '<span color="#66c0f4">Steam\u5c01\u9762\u641c\u7d22\u4e2d...</span>')
+        self.status_label.show()
+        self._pending_exe_path = exe_path
+
+        def _do_search():
+            portrait, landscape = search_steam_cover(game_name)
+            from gi.repository import GLib
+            GLib.idle_add(self._on_steam_then_local, portrait, landscape)
+
+        t = threading.Thread(target=_do_search, daemon=True)
+        t.start()
+
+    def _on_steam_then_local(self, portrait, landscape):
+        """Steam搜索完成回调：有结果用Steam的，没有用本地的"""
+        if portrait and not self.portrait_drop.file_path:
+            self.portrait_drop.set_file(portrait)
+        if landscape and not self.landscape_drop.file_path:
+            self.landscape_drop.set_file(landscape)
+
+        if portrait or landscape:
+            self.status_label.set_markup(
+                '<span color="#4a8">\u2713 \u5df2\u4eceSteam\u83b7\u53d6\u5c01\u9762</span>')
+        else:
+            # Steam没有，用本地图片
+            exe_path = getattr(self, '_pending_exe_path', None)
+            if exe_path and not self.portrait_drop.file_path and not self.landscape_drop.file_path:
+                images = find_images_near_exe(exe_path)
+                if len(images) >= 2:
+                    self.portrait_drop.set_file(images[0])
+                    self.landscape_drop.set_file(images[1])
+                elif len(images) == 1:
+                    self.portrait_drop.set_file(images[0])
+                    self.landscape_drop.set_file(images[0])
+
+            if self.portrait_drop.file_path or self.landscape_drop.file_path:
+                self.status_label.set_markup(
+                    '<span color="#4a8">\u2713 \u5df2\u4f7f\u7528\u672c\u5730\u5c01\u9762</span>')
+            else:
+                self.status_label.set_markup(
+                    '<span color="#8f98a0">Steam\u672a\u627e\u5230\u5c01\u9762\uff0c\u8bf7\u624b\u52a8\u6dfb\u52a0</span>')
+
+        from gi.repository import GLib
+        GLib.timeout_add(3000, self._hide_status)
+        return False
+
     def _search_steam_covers(self, game_name):
-        """后台搜索Steam封面"""
+        """纯Steam搜索（手动按钮用）"""
         self.status_label.set_markup(
             '<span color="#66c0f4">Steam\u5c01\u9762\u641c\u7d22\u4e2d...</span>')
         self.status_label.show()
 
         def _do_search():
             portrait, landscape = search_steam_cover(game_name)
-            # 回到主线程更新UI
             from gi.repository import GLib
             GLib.idle_add(self._on_steam_covers_found, portrait, landscape)
 
@@ -974,7 +1012,7 @@ class AddGameWindow(Gtk.Window):
         t.start()
 
     def _on_steam_covers_found(self, portrait, landscape):
-        """Steam封面搜索结果回调（主线程）"""
+        """纯Steam搜索回调"""
         if portrait and not self.portrait_drop.file_path:
             self.portrait_drop.set_file(portrait)
         if landscape and not self.landscape_drop.file_path:
@@ -985,11 +1023,10 @@ class AddGameWindow(Gtk.Window):
                 '<span color="#4a8">\u2713 \u5df2\u4eceSteam\u83b7\u53d6\u5c01\u9762</span>')
         else:
             self.status_label.set_markup(
-                '<span color="#8f98a0">Steam\u672a\u627e\u5230\u5c01\u9762\uff0c\u8bf7\u624b\u52a8\u6dfb\u52a0</span>')
-        # 3秒后隐藏状态
+                '<span color="#8f98a0">Steam\u672a\u627e\u5230\u5c01\u9762</span>')
         from gi.repository import GLib
         GLib.timeout_add(3000, self._hide_status)
-        return False  # GLib.idle_add one-shot
+        return False
 
     def _hide_status(self):
         self.status_label.hide()
