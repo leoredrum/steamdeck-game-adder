@@ -12,8 +12,12 @@ import shutil
 import os
 import re
 import zlib
+import json
+import tempfile
+import threading
+import urllib.request
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlparse, quote
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -359,6 +363,65 @@ def install_landscape_image(unsigned_appid, image_path):
     shutil.copy2(image_path, GRID_DIR / f"{unsigned_appid}{ext}")
 
 
+# ==================== Steam封面搜索 ====================
+
+_STEAM_SEARCH_URL = 'https://store.steampowered.com/api/storesearch/?term={}&l=schinese&cc=CN'
+_STEAM_CDN = 'https://cdn.akamai.steamstatic.com/steam/apps/{}/{}'
+_UA = {'User-Agent': 'Mozilla/5.0'}
+
+
+def search_steam_cover(game_name):
+    """搜索Steam商店，返回 (portrait_path, landscape_path) 或 (None, None)
+    下载到临时文件。"""
+    try:
+        url = _STEAM_SEARCH_URL.format(quote(game_name))
+        req = urllib.request.Request(url, headers=_UA)
+        resp = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(resp.read())
+    except Exception:
+        return None, None
+
+    items = data.get('items', [])
+    if not items:
+        return None, None
+
+    steam_appid = items[0]['id']
+    steam_name = items[0].get('name', '')
+
+    portrait_path = None
+    landscape_path = None
+
+    # 下载竖版封面
+    for suffix in ('library_600x900_2x.jpg', 'library_600x900.jpg'):
+        img_url = _STEAM_CDN.format(steam_appid, suffix)
+        try:
+            req = urllib.request.Request(img_url, headers=_UA)
+            resp = urllib.request.urlopen(req, timeout=10)
+            if resp.status == 200:
+                tmp = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
+                tmp.write(resp.read())
+                tmp.close()
+                portrait_path = tmp.name
+                break
+        except Exception:
+            continue
+
+    # 下载横版封面
+    img_url = _STEAM_CDN.format(steam_appid, 'header.jpg')
+    try:
+        req = urllib.request.Request(img_url, headers=_UA)
+        resp = urllib.request.urlopen(req, timeout=10)
+        if resp.status == 200:
+            tmp = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
+            tmp.write(resp.read())
+            tmp.close()
+            landscape_path = tmp.name
+    except Exception:
+        pass
+
+    return portrait_path, landscape_path
+
+
 # ==================== 自动匹配文件 ====================
 
 _IMG_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.webp'}
@@ -441,6 +504,55 @@ def find_exe_near_image(image_path):
             scored.append((3, f))
     scored.sort(key=lambda x: (x[0], x[1].name))
     return str(scored[0][1])
+
+
+def scan_game_folder(game_dir):
+    """扫描Game文件夹，返回每个子文件夹的 (name, exe, portrait, landscape) 列表"""
+    results = []
+    game_path = Path(game_dir)
+    if not game_path.is_dir():
+        return results
+
+    for sub in sorted(game_path.iterdir()):
+        if not sub.is_dir():
+            continue
+        # 找exe
+        exe_candidates = []
+        for f in sub.rglob('*.exe'):
+            exe_candidates.append(f)
+        for f in sub.rglob('*.EXE'):
+            if f not in exe_candidates:
+                exe_candidates.append(f)
+        if not exe_candidates:
+            continue
+
+        # 排序选最佳exe
+        folder_lower = sub.name.lower()
+        scored = []
+        for f in exe_candidates:
+            nl = f.stem.lower()
+            if nl == folder_lower or folder_lower.startswith(nl):
+                scored.append((0, f))
+            elif nl == 'game':
+                scored.append((1, f))
+            elif nl in ('launcher', 'start', 'play', 'main'):
+                scored.append((2, f))
+            else:
+                scored.append((3, f))
+        scored.sort(key=lambda x: (x[0], x[1].name))
+        best_exe = str(scored[0][1])
+
+        # 识别游戏名
+        name = detect_game_name(best_exe)
+
+        # 找图片
+        images = find_images_near_exe(best_exe)
+        portrait = images[0] if len(images) >= 1 else None
+        landscape = images[1] if len(images) >= 2 else (images[0] if images else None)
+
+        results.append((name, best_exe, portrait, landscape))
+
+    return results
 
 
 # ==================== 解析拖拽URI ====================
@@ -734,11 +846,22 @@ class AddGameWindow(Gtk.Window):
         name_label.set_markup('<span color="#c7d5e0">\u6e38\u620f\u540d\u79f0 (\u81ea\u52a8\u8bc6\u522b\uff0c\u53ef\u4fee\u6539)</span>')
         name_label.set_halign(Gtk.Align.START)
         name_box.pack_start(name_label, False, False, 0)
+        name_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.name_entry = Gtk.Entry()
         self.name_entry.get_style_context().add_class('name-entry')
         self.name_entry.set_placeholder_text("\u62d6\u5165EXE\u540e\u81ea\u52a8\u586b\u5199...")
-        name_box.pack_start(self.name_entry, False, False, 0)
+        name_row.pack_start(self.name_entry, True, True, 0)
+        self.steam_btn = Gtk.Button(label="\u641c\u7d22Steam\u5c01\u9762")
+        self.steam_btn.connect('clicked', self._on_steam_search_click)
+        name_row.pack_start(self.steam_btn, False, False, 0)
+        name_box.pack_start(name_row, False, False, 0)
         vbox.pack_start(name_box, False, False, 4)
+
+        # 状态提示
+        self.status_label = Gtk.Label()
+        self.status_label.set_markup('')
+        self.status_label.set_no_show_all(True)
+        vbox.pack_start(self.status_label, False, False, 0)
 
         proton_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         proton_label = Gtk.Label()
@@ -765,6 +888,12 @@ class AddGameWindow(Gtk.Window):
         self.confirm_btn.connect('clicked', self._on_confirm)
         btn_row.pack_start(self.confirm_btn, True, True, 0)
 
+        self.batch_btn = Gtk.Button(label="\u6279\u91cf\u6dfb\u52a0")
+        self.batch_btn.get_style_context().add_class('confirm-button')
+        self.batch_btn.set_size_request(-1, 50)
+        self.batch_btn.connect('clicked', self._on_batch)
+        btn_row.pack_start(self.batch_btn, False, False, 0)
+
         self.cleanup_btn = Gtk.Button(label="\u6e05\u7406\u65e0\u6548\u6e38\u620f")
         self.cleanup_btn.get_style_context().add_class('cleanup-button')
         self.cleanup_btn.set_size_request(-1, 50)
@@ -776,7 +905,7 @@ class AddGameWindow(Gtk.Window):
     def _on_exe_set(self, path):
         name = detect_game_name(path)
         self.name_entry.set_text(name)
-        # 自动匹配图片
+        # 自动匹配本地图片
         if not self.portrait_drop.file_path and not self.landscape_drop.file_path:
             images = find_images_near_exe(path)
             if len(images) >= 2:
@@ -785,6 +914,9 @@ class AddGameWindow(Gtk.Window):
             elif len(images) == 1:
                 self.portrait_drop.set_file(images[0])
                 self.landscape_drop.set_file(images[0])
+            else:
+                # 本地没图片，后台搜索Steam封面
+                self._search_steam_covers(name)
 
     def _on_portrait_set(self, path):
         # 拖入竖版图片时，自动匹配exe和横版图片
@@ -814,6 +946,54 @@ class AddGameWindow(Gtk.Window):
             others = [img for img in images if img != path]
             if others:
                 self.portrait_drop.set_file(others[0])
+
+    def _on_steam_search_click(self, button):
+        """手动点击搜索Steam封面"""
+        name = self.name_entry.get_text().strip()
+        if not name:
+            self._show_msg("\u63d0\u793a", "\u8bf7\u5148\u8f93\u5165\u6e38\u620f\u540d\u79f0", Gtk.MessageType.INFO)
+            return
+        # 清空已有图片重新搜索
+        self._reset_drop_zone(self.portrait_drop, "\u7ad6\u7248 600x900\n\u62d6\u5165\u6216\u70b9\u51fb")
+        self._reset_drop_zone(self.landscape_drop, "\u6a2a\u7248 920x430\n\u62d6\u5165\u6216\u70b9\u51fb")
+        self._search_steam_covers(name)
+
+    def _search_steam_covers(self, game_name):
+        """后台搜索Steam封面"""
+        self.status_label.set_markup(
+            '<span color="#66c0f4">Steam\u5c01\u9762\u641c\u7d22\u4e2d...</span>')
+        self.status_label.show()
+
+        def _do_search():
+            portrait, landscape = search_steam_cover(game_name)
+            # 回到主线程更新UI
+            from gi.repository import GLib
+            GLib.idle_add(self._on_steam_covers_found, portrait, landscape)
+
+        t = threading.Thread(target=_do_search, daemon=True)
+        t.start()
+
+    def _on_steam_covers_found(self, portrait, landscape):
+        """Steam封面搜索结果回调（主线程）"""
+        if portrait and not self.portrait_drop.file_path:
+            self.portrait_drop.set_file(portrait)
+        if landscape and not self.landscape_drop.file_path:
+            self.landscape_drop.set_file(landscape)
+
+        if portrait or landscape:
+            self.status_label.set_markup(
+                '<span color="#4a8">\u2713 \u5df2\u4eceSteam\u83b7\u53d6\u5c01\u9762</span>')
+        else:
+            self.status_label.set_markup(
+                '<span color="#8f98a0">Steam\u672a\u627e\u5230\u5c01\u9762\uff0c\u8bf7\u624b\u52a8\u6dfb\u52a0</span>')
+        # 3秒后隐藏状态
+        from gi.repository import GLib
+        GLib.timeout_add(3000, self._hide_status)
+        return False  # GLib.idle_add one-shot
+
+    def _hide_status(self):
+        self.status_label.hide()
+        return False
 
     def _reset_drop_zone(self, drop, hint_text):
         drop.file_path = None
@@ -913,6 +1093,175 @@ class AddGameWindow(Gtk.Window):
         self._reset_drop_zone(self.portrait_drop, "\u7ad6\u7248 600x900\n\u62d6\u5165\u6216\u70b9\u51fb")
         self._reset_drop_zone(self.landscape_drop, "\u6a2a\u7248 920x430\n\u62d6\u5165\u6216\u70b9\u51fb")
         self.name_entry.set_text("")
+
+    def _on_batch(self, button):
+        """选择Game文件夹，批量扫描并添加所有游戏"""
+        dialog = Gtk.FileChooserDialog(
+            title="\u9009\u62e9\u6e38\u620f\u6587\u4ef6\u5939 (Game)",
+            parent=self,
+            action=Gtk.FileChooserAction.SELECT_FOLDER,
+        )
+        dialog.add_buttons(
+            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+            Gtk.STOCK_OPEN, Gtk.ResponseType.OK,
+        )
+        response = dialog.run()
+        folder = dialog.get_filename() if response == Gtk.ResponseType.OK else None
+        dialog.destroy()
+        if not folder:
+            return
+
+        # 扫描
+        games = scan_game_folder(folder)
+        if not games:
+            self._show_msg("\u63d0\u793a",
+                           "\u8be5\u6587\u4ef6\u5939\u4e0b\u672a\u627e\u5230\u4efb\u4f55\u6e38\u620f\u3002",
+                           Gtk.MessageType.INFO)
+            return
+
+        # 弹出确认窗口，列出所有找到的游戏
+        confirm = Gtk.Dialog(
+            title="\u6279\u91cf\u6dfb\u52a0\u6e38\u620f",
+            transient_for=self, modal=True,
+        )
+        confirm.set_default_size(600, 450)
+        confirm.add_buttons("\u53d6\u6d88", Gtk.ResponseType.CANCEL,
+                            "\u5168\u90e8\u6dfb\u52a0", Gtk.ResponseType.OK)
+
+        content = confirm.get_content_area()
+        content.set_spacing(8)
+        content.set_margin_start(12)
+        content.set_margin_end(12)
+        content.set_margin_top(8)
+
+        hint = Gtk.Label()
+        hint.set_markup(
+            f'<span color="#66c0f4">\u627e\u5230 {len(games)} \u4e2a\u6e38\u620f\uff0c'
+            f'\u52fe\u9009\u8981\u6dfb\u52a0\u7684\uff1a</span>'
+        )
+        hint.set_line_wrap(True)
+        content.pack_start(hint, False, False, 4)
+
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        content.pack_start(scrolled, True, True, 0)
+
+        listbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        scrolled.add(listbox)
+
+        checkboxes = []
+        for name, exe, portrait, landscape in games:
+            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            row.set_margin_start(4)
+            row.set_margin_end(4)
+            row.set_margin_top(2)
+            row.set_margin_bottom(2)
+
+            cb = Gtk.CheckButton(label=name)
+            cb.set_active(True)
+            row.pack_start(cb, False, False, 0)
+
+            exe_short = os.path.basename(exe)
+            img_info = ""
+            if portrait:
+                img_info += " | \u7ad6\u7248\u2713"
+            if landscape and landscape != portrait:
+                img_info += " | \u6a2a\u7248\u2713"
+            elif portrait:
+                img_info += "(\u540c\u56fe)"
+
+            detail = Gtk.Label()
+            detail.set_markup(
+                f'<span size="small" color="#8f98a0">'
+                f'EXE: {exe_short}{img_info}</span>'
+            )
+            detail.set_halign(Gtk.Align.START)
+            detail.set_margin_start(24)
+            row.pack_start(detail, False, False, 0)
+
+            listbox.pack_start(row, False, False, 0)
+            checkboxes.append((cb, name, exe, portrait, landscape))
+
+        confirm.show_all()
+        resp = confirm.run()
+
+        if resp == Gtk.ResponseType.OK:
+            shortcuts = load_shortcuts()
+            added = 0
+            for cb, name, exe, portrait, landscape in checkboxes:
+                if not cb.get_active():
+                    continue
+                exe_quoted = f'"{exe}"'
+                start_dir = f'"{str(Path(exe).parent)}"'
+                signed_id, unsigned_id = calc_appid(exe_quoted, name)
+
+                # 覆盖或新增
+                existing_idx = None
+                for idx, entry in shortcuts.items():
+                    if isinstance(entry, dict) and entry.get("AppName") == name:
+                        existing_idx = idx
+                        break
+                target_idx = existing_idx if existing_idx is not None else str(get_next_index(shortcuts))
+                shortcuts[target_idx] = {
+                    "appid": signed_id,
+                    "AppName": name,
+                    "Exe": exe_quoted,
+                    "StartDir": start_dir,
+                    "icon": "",
+                    "ShortcutPath": "",
+                    "LaunchOptions": "",
+                    "IsHidden": 0,
+                    "AllowDesktopConfig": 1,
+                    "AllowOverlay": 1,
+                    "OpenVR": 0,
+                    "Devkit": 0,
+                    "DevkitGameID": "",
+                    "DevkitOverrideAppID": 0,
+                    "LastPlayTime": 0,
+                    "FlatpakAppID": "",
+                    "sortas": "",
+                    "tags": {}
+                }
+
+                # 安装封面
+                if not portrait and not landscape:
+                    portrait = landscape = None
+                if portrait and not landscape:
+                    landscape = portrait
+                if landscape and not portrait:
+                    portrait = landscape
+                try:
+                    if portrait and os.path.isfile(portrait):
+                        install_portrait_image(unsigned_id, portrait)
+                    if landscape and os.path.isfile(landscape):
+                        install_landscape_image(unsigned_id, landscape)
+                except Exception:
+                    pass
+
+                # 设Proton
+                proton_id = self.proton_combo.get_active_id()
+                if proton_id:
+                    try:
+                        set_proton_compat(unsigned_id, proton_id)
+                    except Exception:
+                        pass
+                added += 1
+
+            try:
+                save_shortcuts(shortcuts)
+            except Exception as e:
+                confirm.destroy()
+                self._show_msg("\u9519\u8bef", f"\u4fdd\u5b58\u5931\u8d25\uff1a\n{e}", Gtk.MessageType.ERROR)
+                return
+
+            confirm.destroy()
+            self._show_msg("\u6279\u91cf\u6dfb\u52a0\u5b8c\u6210",
+                           f"\u5df2\u6dfb\u52a0 {added} \u4e2a\u6e38\u620f\uff01\n\n"
+                           "\u8bf7\u91cd\u542fSteam\u540e\u751f\u6548\u3002\n"
+                           "\u5982\u6709\u4e0d\u5bf9\u7684\uff0c\u53ef\u4ee5\u5355\u72ec\u62d6\u5165\u8986\u76d6\u4fee\u6539\u3002",
+                           Gtk.MessageType.INFO)
+        else:
+            confirm.destroy()
 
     def _on_cleanup(self, button):
         shortcuts = load_shortcuts()
