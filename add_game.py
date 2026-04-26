@@ -1223,16 +1223,76 @@ class AddGameWindow(Gtk.Window):
         resp = confirm.run()
 
         if resp == Gtk.ResponseType.OK:
-            shortcuts = load_shortcuts()
-            added = 0
+            # 收集勾选的游戏
+            selected = []
             for cb, name, exe, portrait, landscape in checkboxes:
-                if not cb.get_active():
-                    continue
+                if cb.get_active():
+                    selected.append((name, exe, portrait, landscape))
+            confirm.destroy()
+
+            if not selected:
+                return
+
+            # 弹出进度窗口，后台逐个搜索Steam封面并添加
+            self._batch_add_with_steam(selected)
+        else:
+            confirm.destroy()
+
+    def _batch_add_with_steam(self, selected_games):
+        """后台批量添加：逐个搜Steam封面，有进度显示"""
+        progress_dialog = Gtk.Dialog(
+            title="\u6279\u91cf\u6dfb\u52a0\u4e2d...",
+            transient_for=self, modal=True,
+        )
+        progress_dialog.set_default_size(400, 120)
+        progress_dialog.set_deletable(False)
+
+        content = progress_dialog.get_content_area()
+        content.set_spacing(8)
+        content.set_margin_start(20)
+        content.set_margin_end(20)
+        content.set_margin_top(15)
+        content.set_margin_bottom(15)
+
+        self._batch_label = Gtk.Label()
+        self._batch_label.set_markup('<span color="#c7d5e0">\u51c6\u5907\u4e2d...</span>')
+        content.pack_start(self._batch_label, False, False, 0)
+
+        self._batch_bar = Gtk.ProgressBar()
+        content.pack_start(self._batch_bar, False, False, 0)
+
+        progress_dialog.show_all()
+        self._batch_dialog = progress_dialog
+        self._batch_games = selected_games
+        self._batch_total = len(selected_games)
+        self._batch_done = 0
+        self._batch_added = 0
+
+        def _do_batch():
+            from gi.repository import GLib
+            shortcuts = load_shortcuts()
+
+            for i, (name, exe, portrait, landscape) in enumerate(selected_games):
+                # 更新进度
+                GLib.idle_add(self._batch_update_progress, i, name)
+
+                # 优先搜Steam封面
+                steam_p, steam_l = search_steam_cover(name)
+                if steam_p:
+                    portrait = steam_p
+                if steam_l:
+                    landscape = steam_l
+
+                # 只有一张图时两边都用
+                if portrait and not landscape:
+                    landscape = portrait
+                if landscape and not portrait:
+                    portrait = landscape
+
                 exe_quoted = f'"{exe}"'
                 start_dir = f'"{str(Path(exe).parent)}"'
                 signed_id, unsigned_id = calc_appid(exe_quoted, name)
 
-                # 覆盖或新增
                 existing_idx = None
                 for idx, entry in shortcuts.items():
                     if isinstance(entry, dict) and entry.get("AppName") == name:
@@ -1260,13 +1320,6 @@ class AddGameWindow(Gtk.Window):
                     "tags": {}
                 }
 
-                # 安装封面
-                if not portrait and not landscape:
-                    portrait = landscape = None
-                if portrait and not landscape:
-                    landscape = portrait
-                if landscape and not portrait:
-                    portrait = landscape
                 try:
                     if portrait and os.path.isfile(portrait):
                         install_portrait_image(unsigned_id, portrait)
@@ -1275,30 +1328,41 @@ class AddGameWindow(Gtk.Window):
                 except Exception:
                     pass
 
-                # 设Proton
                 proton_id = self.proton_combo.get_active_id()
                 if proton_id:
                     try:
                         set_proton_compat(unsigned_id, proton_id)
                     except Exception:
                         pass
-                added += 1
 
             try:
                 save_shortcuts(shortcuts)
-            except Exception as e:
-                confirm.destroy()
-                self._show_msg("\u9519\u8bef", f"\u4fdd\u5b58\u5931\u8d25\uff1a\n{e}", Gtk.MessageType.ERROR)
-                return
+            except Exception:
+                pass
 
-            confirm.destroy()
-            self._show_msg("\u6279\u91cf\u6dfb\u52a0\u5b8c\u6210",
-                           f"\u5df2\u6dfb\u52a0 {added} \u4e2a\u6e38\u620f\uff01\n\n"
-                           "\u8bf7\u91cd\u542fSteam\u540e\u751f\u6548\u3002\n"
-                           "\u5982\u6709\u4e0d\u5bf9\u7684\uff0c\u53ef\u4ee5\u5355\u72ec\u62d6\u5165\u8986\u76d6\u4fee\u6539\u3002",
-                           Gtk.MessageType.INFO)
-        else:
-            confirm.destroy()
+            GLib.idle_add(self._batch_finish, len(selected_games))
+
+        t = threading.Thread(target=_do_batch, daemon=True)
+        t.start()
+
+    def _batch_update_progress(self, index, name):
+        frac = (index + 1) / self._batch_total
+        self._batch_bar.set_fraction(frac)
+        self._batch_label.set_markup(
+            f'<span color="#c7d5e0">({index+1}/{self._batch_total}) '
+            f'\u641c\u7d22\u5c01\u9762\u5e76\u6dfb\u52a0: {name}</span>')
+        return False
+
+    def _batch_finish(self, count):
+        self._batch_dialog.destroy()
+        self._show_msg("\u6279\u91cf\u6dfb\u52a0\u5b8c\u6210",
+                       f"\u5df2\u6dfb\u52a0 {count} \u4e2a\u6e38\u620f\uff01\n\n"
+                       "\u5c01\u9762\u4f18\u5148\u4f7f\u7528Steam\u5546\u5e97\u56fe\u7247\uff0c"
+                       "\u672a\u627e\u5230\u7684\u4f7f\u7528\u672c\u5730\u56fe\u7247\u3002\n\n"
+                       "\u8bf7\u91cd\u542fSteam\u540e\u751f\u6548\u3002\n"
+                       "\u5982\u6709\u4e0d\u5bf9\u7684\uff0c\u53ef\u4ee5\u5355\u72ec\u62d6\u5165\u8986\u76d6\u4fee\u6539\u3002",
+                       Gtk.MessageType.INFO)
+        return False
 
     def _on_cleanup(self, button):
         shortcuts = load_shortcuts()
