@@ -359,6 +359,90 @@ def install_landscape_image(unsigned_appid, image_path):
     shutil.copy2(image_path, GRID_DIR / f"{unsigned_appid}{ext}")
 
 
+# ==================== 自动匹配文件 ====================
+
+_IMG_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.webp'}
+
+
+def _find_game_root(file_path):
+    """找到Game文件夹的子文件夹（扫描上限）"""
+    p = Path(file_path)
+    game_roots = {'game', 'games'}
+    for parent in p.parents:
+        if parent.name.lower() in game_roots:
+            # 返回Game下的第一级子文件夹
+            # file_path在Game/X/...里，X就是游戏根目录
+            rel = p.relative_to(parent)
+            return parent / rel.parts[0]
+    return None
+
+
+def _scan_folders_up(start_path, game_root=None):
+    """从start_path所在文件夹向上扫描，直到game_root，返回所有要扫描的文件夹"""
+    folders = []
+    current = Path(start_path).parent
+    while True:
+        folders.append(current)
+        if game_root and current == game_root:
+            break
+        if current.parent == current:
+            break
+        current = current.parent
+        if game_root and not str(current).startswith(str(game_root.parent)):
+            break
+    return folders
+
+
+def find_images_near_exe(exe_path):
+    """从exe所在文件夹向上扫描找图片，返回排序后的图片列表"""
+    game_root = _find_game_root(exe_path)
+    folders = _scan_folders_up(exe_path, game_root)
+
+    images = []
+    seen = set()
+    for folder in folders:
+        if not folder.is_dir():
+            continue
+        for f in sorted(folder.iterdir()):
+            if f.is_file() and f.suffix.lower() in _IMG_EXTS and f not in seen:
+                seen.add(f)
+                images.append(str(f))
+    return images
+
+
+def find_exe_near_image(image_path):
+    """从图片所在文件夹及子文件夹找exe"""
+    game_root = _find_game_root(image_path)
+    search_root = game_root if game_root else Path(image_path).parent
+
+    # 收集所有exe
+    candidates = []
+    for f in search_root.rglob('*.exe'):
+        candidates.append(f)
+    for f in search_root.rglob('*.EXE'):
+        if f not in candidates:
+            candidates.append(f)
+
+    if not candidates:
+        return None
+
+    # 优先级排序：文件夹名相关 > game.exe > 其他
+    folder_name = search_root.name.lower()
+    scored = []
+    for f in candidates:
+        name_lower = f.stem.lower()
+        if name_lower == folder_name or folder_name.startswith(name_lower):
+            scored.append((0, f))
+        elif name_lower == 'game':
+            scored.append((1, f))
+        elif name_lower in ('launcher', 'start', 'play', 'main'):
+            scored.append((2, f))
+        else:
+            scored.append((3, f))
+    scored.sort(key=lambda x: (x[0], x[1].name))
+    return str(scored[0][1])
+
+
 # ==================== 解析拖拽URI ====================
 
 def parse_drop_uris(data):
@@ -628,6 +712,7 @@ class AddGameWindow(Gtk.Window):
         self.portrait_drop = DropZone(
             "\u7ad6\u7248 600x900\n\u62d6\u5165\u6216\u70b9\u51fb",
             file_filter_func=img_filter,
+            on_file_set=self._on_portrait_set,
         )
         portrait_box.pack_start(self.portrait_drop, True, True, 0)
         drop_row.pack_start(portrait_box, True, True, 0)
@@ -639,6 +724,7 @@ class AddGameWindow(Gtk.Window):
         self.landscape_drop = DropZone(
             "\u6a2a\u7248 920x430\n\u62d6\u5165\u6216\u70b9\u51fb",
             file_filter_func=img_filter,
+            on_file_set=self._on_landscape_set,
         )
         landscape_box.pack_start(self.landscape_drop, True, True, 0)
         drop_row.pack_start(landscape_box, True, True, 0)
@@ -690,6 +776,44 @@ class AddGameWindow(Gtk.Window):
     def _on_exe_set(self, path):
         name = detect_game_name(path)
         self.name_entry.set_text(name)
+        # 自动匹配图片
+        if not self.portrait_drop.file_path and not self.landscape_drop.file_path:
+            images = find_images_near_exe(path)
+            if len(images) >= 2:
+                self.portrait_drop.set_file(images[0])
+                self.landscape_drop.set_file(images[1])
+            elif len(images) == 1:
+                self.portrait_drop.set_file(images[0])
+                self.landscape_drop.set_file(images[0])
+
+    def _on_portrait_set(self, path):
+        # 拖入竖版图片时，自动匹配exe和横版图片
+        if not self.exe_drop.file_path:
+            exe = find_exe_near_image(path)
+            if exe:
+                self.exe_drop.set_file(exe)
+                name = detect_game_name(exe)
+                self.name_entry.set_text(name)
+        if not self.landscape_drop.file_path:
+            # 找同目录下的其他图片
+            images = find_images_near_exe(path)
+            others = [img for img in images if img != path]
+            if others:
+                self.landscape_drop.set_file(others[0])
+
+    def _on_landscape_set(self, path):
+        # 拖入横版图片时，自动匹配exe和竖版图片
+        if not self.exe_drop.file_path:
+            exe = find_exe_near_image(path)
+            if exe:
+                self.exe_drop.set_file(exe)
+                name = detect_game_name(exe)
+                self.name_entry.set_text(name)
+        if not self.portrait_drop.file_path:
+            images = find_images_near_exe(path)
+            others = [img for img in images if img != path]
+            if others:
+                self.portrait_drop.set_file(others[0])
 
     def _reset_drop_zone(self, drop, hint_text):
         drop.file_path = None
