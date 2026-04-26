@@ -336,19 +336,27 @@ def set_proton_compat(unsigned_appid, proton_name):
 
 # ==================== 封面图处理 ====================
 
-def install_cover_image(unsigned_appid, image_path):
-    GRID_DIR.mkdir(parents=True, exist_ok=True)
-    src = Path(image_path)
-    ext = src.suffix.lower()
+def _norm_ext(path):
+    ext = Path(path).suffix.lower()
     if ext not in ('.png', '.jpg', '.jpeg', '.bmp', '.webp'):
         ext = '.png'
     if ext == '.jpeg':
         ext = '.jpg'
-    dst = GRID_DIR / f"{unsigned_appid}p{ext}"
-    shutil.copy2(src, dst)
-    dst2 = GRID_DIR / f"{unsigned_appid}{ext}"
-    shutil.copy2(src, dst2)
-    return True
+    return ext
+
+
+def install_portrait_image(unsigned_appid, image_path):
+    """安装竖版封面 {appid}p.ext — 600x900，库网格视图"""
+    GRID_DIR.mkdir(parents=True, exist_ok=True)
+    ext = _norm_ext(image_path)
+    shutil.copy2(image_path, GRID_DIR / f"{unsigned_appid}p{ext}")
+
+
+def install_landscape_image(unsigned_appid, image_path):
+    """安装横版封面 {appid}.ext — 920x430，库横版/最近游戏"""
+    GRID_DIR.mkdir(parents=True, exist_ok=True)
+    ext = _norm_ext(image_path)
+    shutil.copy2(image_path, GRID_DIR / f"{unsigned_appid}{ext}")
 
 
 # ==================== 解析拖拽URI ====================
@@ -574,7 +582,7 @@ class DropZone(Gtk.EventBox):
 class AddGameWindow(Gtk.Window):
     def __init__(self):
         super().__init__(title="Steam Deck - \u6dfb\u52a0\u975eSteam\u6e38\u620f")
-        self.set_default_size(560, 560)
+        self.set_default_size(680, 580)
         self.set_resizable(False)
         self.set_position(Gtk.WindowPosition.CENTER)
 
@@ -611,16 +619,29 @@ class AddGameWindow(Gtk.Window):
         exe_box.pack_start(self.exe_drop, True, True, 0)
         drop_row.pack_start(exe_box, True, True, 0)
 
-        img_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        img_label = Gtk.Label()
-        img_label.set_markup('<span color="#c7d5e0">\u5c01\u9762\u56fe\u7247 (\u53ef\u9009)</span>')
-        img_box.pack_start(img_label, False, False, 0)
-        self.img_drop = DropZone(
-            "\u5c06\u56fe\u7247\u62d6\u5230\u8fd9\u91cc\n\u6216\u70b9\u51fb\u9009\u62e9",
-            file_filter_func=lambda p: os.path.splitext(p)[1].lower() in ('.png', '.jpg', '.jpeg', '.bmp', '.webp'),
+        img_filter = lambda p: os.path.splitext(p)[1].lower() in ('.png', '.jpg', '.jpeg', '.bmp', '.webp')
+
+        portrait_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        portrait_label = Gtk.Label()
+        portrait_label.set_markup('<span color="#c7d5e0">\u7ad6\u7248\u5c01\u9762 (\u53ef\u9009)</span>')
+        portrait_box.pack_start(portrait_label, False, False, 0)
+        self.portrait_drop = DropZone(
+            "\u7ad6\u7248 600x900\n\u62d6\u5165\u6216\u70b9\u51fb",
+            file_filter_func=img_filter,
         )
-        img_box.pack_start(self.img_drop, True, True, 0)
-        drop_row.pack_start(img_box, True, True, 0)
+        portrait_box.pack_start(self.portrait_drop, True, True, 0)
+        drop_row.pack_start(portrait_box, True, True, 0)
+
+        landscape_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        landscape_label = Gtk.Label()
+        landscape_label.set_markup('<span color="#c7d5e0">\u6a2a\u7248\u5c01\u9762 (\u53ef\u9009)</span>')
+        landscape_box.pack_start(landscape_label, False, False, 0)
+        self.landscape_drop = DropZone(
+            "\u6a2a\u7248 920x430\n\u62d6\u5165\u6216\u70b9\u51fb",
+            file_filter_func=img_filter,
+        )
+        landscape_box.pack_start(self.landscape_drop, True, True, 0)
+        drop_row.pack_start(landscape_box, True, True, 0)
 
         name_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         name_label = Gtk.Label()
@@ -734,12 +755,20 @@ class AddGameWindow(Gtk.Window):
             self._show_msg("\u9519\u8bef", f"\u4fdd\u5b58\u5931\u8d25\uff1a\n{e}", Gtk.MessageType.ERROR)
             return
 
-        image = self.img_drop.file_path
-        if image and os.path.isfile(image):
-            try:
-                install_cover_image(unsigned_id, image)
-            except Exception as e:
-                self._show_msg("\u8b66\u544a", f"\u5c01\u9762\u56fe\u5b89\u88c5\u5931\u8d25\uff1a\n{e}", Gtk.MessageType.WARNING)
+        portrait = self.portrait_drop.file_path
+        landscape = self.landscape_drop.file_path
+        # 如果只有一张图，两种��面都用同一张
+        if portrait and not landscape:
+            landscape = portrait
+        if landscape and not portrait:
+            portrait = landscape
+        try:
+            if portrait and os.path.isfile(portrait):
+                install_portrait_image(unsigned_id, portrait)
+            if landscape and os.path.isfile(landscape):
+                install_landscape_image(unsigned_id, landscape)
+        except Exception as e:
+            self._show_msg("\u8b66\u544a", f"\u5c01\u9762\u56fe\u5b89\u88c5\u5931\u8d25\uff1a\n{e}", Gtk.MessageType.WARNING)
 
         proton_id = self.proton_combo.get_active_id()
         if proton_id:
@@ -757,7 +786,8 @@ class AddGameWindow(Gtk.Window):
                        Gtk.MessageType.INFO)
 
         self._reset_drop_zone(self.exe_drop, "\u5c06 EXE \u62d6\u5230\u8fd9\u91cc\n\u6216\u70b9\u51fb\u9009\u62e9")
-        self._reset_drop_zone(self.img_drop, "\u5c06\u56fe\u7247\u62d6\u5230\u8fd9\u91cc\n\u6216\u70b9\u51fb\u9009\u62e9")
+        self._reset_drop_zone(self.portrait_drop, "\u7ad6\u7248 600x900\n\u62d6\u5165\u6216\u70b9\u51fb")
+        self._reset_drop_zone(self.landscape_drop, "\u6a2a\u7248 920x430\n\u62d6\u5165\u6216\u70b9\u51fb")
         self.name_entry.set_text("")
 
     def _on_cleanup(self, button):
