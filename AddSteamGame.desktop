@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=添加非Steam游戏
+Comment=一键添加非Steam游戏到Steam库
+Exec=python3 /home/deck/Desktop/add_game.py
+Icon=steam
+Type=Application
+Terminal=false
+Categories=Game;Utility;

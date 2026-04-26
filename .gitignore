@@ -1,0 +1,38 @@
+# === Secrets (永不 commit) ===
+.env
+.env.*
+!.env.example
+secrets.yaml
+secrets*.yaml
+secrets*.yml
+*.secret
+*.pem
+*.key
+cookies.json
+id_rsa*
+id_ed25519*
+
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# === Logs ===
+*.log
+*.tmp
+logs/
+
+# === Editor / OS ===
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# === Backup files ===
+*.bak
+*.bak.*
